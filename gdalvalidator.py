@@ -55,9 +55,8 @@ class GDALValidator(osr.SpatialReference):
         Must begin with an l/L
         """
         try:
-            if self.sceneid[0].upper() == 'L':
-                self.path = int(self.sceneid[3:6])
-                self.row = int(self.sceneid[6:9])
+            self.path = int(self.sceneid[3:6])
+            self.row = int(self.sceneid[6:9])
         except Exception:
             raise ValidationException('Unsupported scene id')
 
