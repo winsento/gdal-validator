@@ -1,8 +1,6 @@
 import unittest
 
-from gdalvalidator2 import WKTValidate
-from gdalvalidator2 import Proj4Validate
-from gdalvalidator2 import EPSGValidate
+from gdalvalidator import WKTValidate, Proj4Validate, EPSGValidate
 
 
 class ValidatorTestCase(unittest.TestCase):

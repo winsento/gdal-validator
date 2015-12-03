@@ -85,6 +85,8 @@ class GDALValidator(osr.SpatialReference):
         except Exception as e:
             raise ValidationException(e)
 
+        conn.close()
+
     def check_valid(self):
         self.err_num = self.Validate()
         self.err_msg = self.ogrerr_msg(self.err_num)
