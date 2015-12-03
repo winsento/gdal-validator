@@ -1,40 +1,117 @@
-import subprocess
 import os
+import sqlite3
+import warnings
 
 from osgeo import osr
 
 
-# Should come from some config file
-GDAL_WARP_PATH = r'C:\Program Files\GDAL\gdalwarp.exe'
-GDAL_BASE_PATH = r'C:\Program Files\GDAL'
+class ValidationException(Exception):
+    pass
 
 
 class GDALValidator(osr.SpatialReference):
     """
     Used for validating a spatial reference against GDAL's library
     to make sure it is compatible
+
+    Currently only supports Landsat based scene id's
+    Will revisit when/if other sensor types are made available
     """
-    def __init__(self):
+
+    # Deprecated, here just in case
+    POLAR_WKT = 'PROJCS["WGS 84 / Antarctic Polar Stereographic",GEOGCS["WGS 84",\
+    DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]]\
+    ,AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],\
+    UNIT["degree",0.01745329251994328,AUTHORITY["EPSG","9122"]],AUTHORITY["EPSG","4326"]]\
+    ,UNIT["metre",1,AUTHORITY["EPSG","9001"]],PROJECTION["Polar_Stereographic"],\
+    PARAMETER["latitude_of_origin",-71],PARAMETER["central_meridian",0],\
+    PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],\
+    AUTHORITY["EPSG","3031"],AXIS["Easting",UNKNOWN],AXIS["Northing",UNKNOWN]]'
+
+    def __init__(self, sceneid=''):
         super(GDALValidator, self).__init__()
 
+        self.base_path = os.path.dirname(os.path.realpath(__file__))
+        self.sql_db = os.path.join(self.base_path, 'conversion-table.db')
+
+        self.sceneid = sceneid
+        self.sceneproj = osr.SpatialReference()
+        self.path = ''
+        self.row = ''
+        self.zone = 0
         self.valid = False
         self.err_num = 5
         self.err_msg = self.ogrerr_msg(self.err_num)
-        self.warp_path = GDAL_WARP_PATH
-        self.proj_str = ''
+
+        if sceneid:
+            self.build_sceneinfo()
 
     def __nonzero__(self):
         return self.valid
+
+    def set_pathrow(self):
+        """
+        Build the path/row attributes from the Landsat scene id
+        Must begin with an l/L
+        """
+        try:
+            if self.sceneid[0].upper() == 'L':
+                self.path = int(self.sceneid[3:6])
+                self.row = int(self.sceneid[6:9])
+        except Exception:
+            raise ValidationException('Unsupported scene id')
+
+    def set_sceneproj(self):
+        """
+        Set the spatial reference for the scene to be re-projected based on the
+        LPGS UTM
+        """
+        utm_proj4 = '+proj=utm +zone=%s +datum=WGS84 +units=m +no_defs'
+        if self.zone == 3031:
+            self.sceneproj.ImportFromEPSG(3031)
+        else:
+            self.sceneproj.ImportFromProj4(utm_proj4 % self.zone)
+
+    def check_db(self):
+        """
+        Check the database to get the LPGS UTM (or polar) projection it should
+        fall in
+        """
+        conn = sqlite3.connect(self.sql_db)
+        cur = conn.cursor()
+
+        try:
+            cur.execute('SELECT zone FROM conversion WHERE path = ? AND row = ?', (self.path, self.row))
+            self.zone = cur.fetchone()
+        except Exception as e:
+            raise ValidationException(e)
 
     def check_valid(self):
         self.err_num = self.Validate()
         self.err_msg = self.ogrerr_msg(self.err_num)
 
-        # if not self.err_num and self.check_warp():
-        #     self.valid = True
+        if not self.sceneid:
+            if not self.err_num and self.ExportToWkt():
+                self.valid = True
+                warnings.warn('Scene ID not provided, appears OK')
+        else:
+            if self.check_transform():
+                self.valid = True
 
-        if not self.err_num and self.ExportToWkt():
-            self.valid = True
+    def build_sceneinfo(self):
+        self.set_pathrow()
+        self.check_db()
+        self.set_sceneproj()
+
+    def check_transform(self):
+        try:
+            _ = osr.CoordinateTransformation(self.sceneproj, self)
+            return True
+        except Exception as e:
+            self.err_num = 5
+            self.err_msg = self.ogrerr_msg(self.err_num)
+            warnings.warn(e)
+            return False
 
     @staticmethod
     def ogrerr_msg(num):
@@ -64,40 +141,18 @@ class GDALValidator(osr.SpatialReference):
         else:
             return 'Unknown GDAL/OGR Error'
 
-    def check_warp(self):
-        """
-        This method is to be avoided
-        Passes the SRS into a GDALWarp call, capturing the output
-        GDALWarp will give an Error if it is unable to read the SRS
-        WKT needs to be passed in as a file
-        """
-        os.chdir(GDAL_BASE_PATH)  # Otherwise Windows throws an access denied
-
-        try:
-            result = subprocess.check_output([self.warp_path, '-t_srs', self.proj_str],
-                                             stderr=subprocess.STDOUT)
-        except subprocess.CalledProcessError as e:
-            result = e.output
-
-        if 'ERROR' in result:
-            return False
-        else:
-            return True
-
 
 class WKTValidate(GDALValidator):
     """
     GDALValidator subclass for checking well-known-texts
     """
-    def __init__(self, wkt=''):
-        super(WKTValidate, self).__init__()
-
-        self.proj_str = '"{0}"'.format(wkt)
+    def __init__(self, wkt, sceneid=''):
+        super(WKTValidate, self).__init__(sceneid=sceneid)
 
         try:
             self.ImportFromWkt(wkt)
-        except TypeError:
-            pass
+        except TypeError as e:
+            raise ValidationException(e)
 
         self.check_valid()
 
@@ -106,15 +161,13 @@ class Proj4Validate(GDALValidator):
     """
     GDALValidator subclass for checking proj4 strings
     """
-    def __init__(self, proj4=''):
-        super(Proj4Validate, self).__init__()
-
-        self.proj_str = '"{0}"'.format(proj4)
+    def __init__(self, proj4, sceneid=''):
+        super(Proj4Validate, self).__init__(sceneid=sceneid)
 
         try:
             self.ImportFromProj4(proj4)
-        except TypeError:
-            pass
+        except TypeError as e:
+            raise ValidationException(e)
 
         self.check_valid()
 
@@ -122,14 +175,12 @@ class EPSGValidate(GDALValidator):
     """
     GDALValidator subclass for checking EPSG codes
     """
-    def __init__(self, epsg=None):
-        super(EPSGValidate, self).__init__()
-
-        self.proj_str = 'EPSG:{0}'.format(epsg)
+    def __init__(self, epsg, sceneid=''):
+        super(EPSGValidate, self).__init__(sceneid=sceneid)
 
         try:
             self.ImportFromEPSG(epsg)
-        except TypeError:
-            pass
+        except TypeError as e:
+            raise ValidationException(e)
 
         self.check_valid()
