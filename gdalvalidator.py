@@ -95,7 +95,7 @@ class GDALValidator(osr.SpatialReference):
                 self.valid = True
                 warnings.warn('Scene ID not provided, appears OK')
         else:
-            if self.check_transform():
+            if not self.err_num and self.check_transform():
                 self.valid = True
 
     def build_sceneinfo(self):
