@@ -34,6 +34,10 @@ class GDALValidator(osr.SpatialReference):
         self.base_path = os.path.dirname(os.path.realpath(__file__))
         self.sql_db = os.path.join(self.base_path, 'conversion-table.db')
 
+        if not os.path.exists(self.sql_db) and sceneid:
+            warnings.warn('Database not found, unable to verify Landsat scene')
+            sceneid = ''
+
         self.sceneid = sceneid
         self.sceneproj = osr.SpatialReference()
         self.path = ''
@@ -94,7 +98,7 @@ class GDALValidator(osr.SpatialReference):
         if not self.sceneid:
             if not self.err_num and self.ExportToWkt():
                 self.valid = True
-                warnings.warn('Scene ID not provided, appears OK')
+                warnings.warn('Scene ID not provided or database not found, appears OK')
         else:
             if not self.err_num and self.check_transform():
                 self.valid = True
@@ -105,8 +109,16 @@ class GDALValidator(osr.SpatialReference):
         self.set_sceneproj()
 
     def check_transform(self):
+        """
+        Checks to see if the a coordinate transformation object can
+        be created between the two projections
+
+        :return: bool
+        """
+
         try:
             _ = osr.CoordinateTransformation(self.sceneproj, self)
+            _ = osr.CoordinateTransformation(self, self.sceneproj)
             return True
         except Exception as e:
             self.err_num = 5
