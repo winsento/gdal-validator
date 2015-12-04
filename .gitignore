@@ -48,3 +48,6 @@ Temporary Items
 
 # IDE directories
 .idea/
+
+# PYC files
+*.pyc
