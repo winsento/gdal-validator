@@ -1,6 +1,5 @@
 import os
 import sqlite3
-import warnings
 
 from osgeo import osr
 
@@ -15,8 +14,9 @@ class GDALValidator(osr.SpatialReference):
     to make sure it is compatible
 
     Currently only supports Landsat based scene id's
-    Will revisit when/if other sensor types are made available
+    Will revisit to support other sensor types
     """
+    # TODO All prints really should be routed to a logger or warnings
 
     # Deprecated, here just in case
     POLAR_WKT = 'PROJCS["WGS 84 / Antarctic Polar Stereographic",GEOGCS["WGS 84",\
@@ -35,7 +35,7 @@ class GDALValidator(osr.SpatialReference):
         self.sql_db = os.path.join(self.base_path, 'conversion-table.db')
 
         if not os.path.exists(self.sql_db) and sceneid:
-            warnings.warn('Database not found, unable to verify Landsat scene')
+            print('Database not found, unable to verify scene location')
             sceneid = ''
 
         self.sceneid = sceneid
@@ -53,27 +53,10 @@ class GDALValidator(osr.SpatialReference):
     def __nonzero__(self):
         return self.valid
 
-    def set_pathrow(self):
-        """
-        Build the path/row attributes from the Landsat scene id
-        Must begin with an l/L
-        """
-        try:
-            self.path = int(self.sceneid[3:6])
-            self.row = int(self.sceneid[6:9])
-        except Exception:
-            raise ValidationException('Unsupported scene id')
-
-    def set_sceneproj(self):
-        """
-        Set the spatial reference for the scene to be re-projected based on the
-        LPGS UTM
-        """
-        utm_proj4 = '+proj=utm +zone=%s +datum=WGS84 +units=m +no_defs'
-        if self.zone == 3031:
-            self.sceneproj.ImportFromEPSG(3031)
-        else:
-            self.sceneproj.ImportFromProj4(utm_proj4 % self.zone)
+    def build_sceneinfo(self):
+        self.set_pathrow()
+        self.check_db()
+        self.set_sceneproj()
 
     def check_db(self):
         """
@@ -91,6 +74,25 @@ class GDALValidator(osr.SpatialReference):
 
         conn.close()
 
+    def check_transform(self):
+        """
+        Checks to see if the a coordinate transformation object can
+        be created between the two projections
+
+        :return: pass or fail bool
+        """
+
+        try:
+            _ = osr.CoordinateTransformation(self.sceneproj, self)
+            _.TransformPoint(1, 1)
+            _ = osr.CoordinateTransformation(self, self.sceneproj)
+            _.TransformPoint(1, 1)
+            return True
+        except NotImplementedError:
+            self.err_num = 5
+            self.err_msg = self.ogrerr_msg(self.err_num)
+            return False
+
     def check_valid(self):
         self.err_num = self.Validate()
         self.err_msg = self.ogrerr_msg(self.err_num)
@@ -98,33 +100,10 @@ class GDALValidator(osr.SpatialReference):
         if not self.sceneid:
             if not self.err_num and self.ExportToWkt():
                 self.valid = True
-                warnings.warn('Scene ID not provided or database not found, appears OK')
+                print('Scene ID not provided or database not found, appears OK')
         else:
             if not self.err_num and self.check_transform():
                 self.valid = True
-
-    def build_sceneinfo(self):
-        self.set_pathrow()
-        self.check_db()
-        self.set_sceneproj()
-
-    def check_transform(self):
-        """
-        Checks to see if the a coordinate transformation object can
-        be created between the two projections
-
-        :return: bool
-        """
-
-        try:
-            _ = osr.CoordinateTransformation(self.sceneproj, self)
-            _ = osr.CoordinateTransformation(self, self.sceneproj)
-            return True
-        except Exception as e:
-            self.err_num = 5
-            self.err_msg = self.ogrerr_msg(self.err_num)
-            warnings.warn(e)
-            return False
 
     @staticmethod
     def ogrerr_msg(num):
@@ -153,6 +132,30 @@ class GDALValidator(osr.SpatialReference):
             return err_msg[num]
         else:
             return 'Unknown GDAL/OGR Error'
+
+    def set_pathrow(self):
+        """
+        Build the path/row attributes from the Landsat scene id
+        Must begin with an l/L
+        """
+        try:
+            self.path = int(self.sceneid[3:6])
+            self.row = int(self.sceneid[6:9])
+        except ValueError:
+            # raise ValidationException(e)
+            print('Unable to parse scene id, defaulting to no scene id')
+            self.sceneid = ''
+
+    def set_sceneproj(self):
+        """
+        Set the spatial reference for the scene to be re-projected based on the
+        LPGS UTM
+        """
+        utm_proj4 = '+proj=utm +zone={0} +datum=WGS84 +units=m +no_defs'.format(self.zone)
+        if self.zone == 3031:
+            self.sceneproj.ImportFromEPSG(3031)
+        else:
+            self.sceneproj.ImportFromProj4(utm_proj4)
 
 
 class WKTValidate(GDALValidator):
@@ -183,6 +186,7 @@ class Proj4Validate(GDALValidator):
             raise ValidationException(e)
 
         self.check_valid()
+
 
 class EPSGValidate(GDALValidator):
     """
